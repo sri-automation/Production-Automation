@@ -228,7 +228,7 @@ export default function InteractiveTimeline({
     return pct;
   }, [nowTime, visibleStart, visibleEnd]);
 
-  /* ── Wheel: Ctrl+scroll = zoom, Shift+scroll = pan ── */
+  /* ── Wheel: Ctrl+scroll = zoom, normal/Shift+scroll = pan ── */
   const handleWheel = useCallback(
     (e: WheelEvent) => {
       const rect = barRef.current?.getBoundingClientRect();
@@ -243,15 +243,15 @@ export default function InteractiveTimeline({
         );
         const factor = e.deltaY < 0 ? ZOOM_FACTOR : 1 / ZOOM_FACTOR;
         applyZoom(mousePct, factor);
-      } else if (e.shiftKey) {
+      } else if (isZoomed) {
         e.preventDefault();
         e.stopPropagation();
-        const delta = e.deltaY || e.deltaX;
+        const delta = e.shiftKey ? (e.deltaY || e.deltaX) : e.deltaY;
         const panMs = (delta / rect.width) * visibleMs * 3;
         applyPan(panMs);
       }
     },
-    [visibleMs, applyZoom, applyPan]
+    [visibleMs, isZoomed, applyZoom, applyPan]
   );
 
   useEffect(() => {
@@ -510,7 +510,7 @@ export default function InteractiveTimeline({
           {formatDuration(visibleMs)} visible
         </span>
         <span className="itl-hint itl-hint-desktop">
-          Ctrl+Scroll to zoom{isZoomed ? " \u00B7 Shift+Scroll to pan" : ""}
+          Ctrl+Scroll to zoom{isZoomed ? " \u00B7 Scroll to pan" : ""}
         </span>
         <span className="itl-hint itl-hint-mobile">
           Pinch to zoom{isZoomed ? " \u00B7 Swipe to pan" : ""}

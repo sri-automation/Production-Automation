@@ -130,12 +130,52 @@ export default function HomePage() {
         .on(
           "postgres_changes",
           { event: "*", schema: "public", table: "sensor_logs" },
-          debouncedFetch
+          (payload) => {
+            if (payload.eventType === "INSERT" && payload.new) {
+              const { device_id, state, created_at } = payload.new as {
+                device_id?: string;
+                state?: string;
+                created_at?: string;
+              };
+              if (device_id && state) {
+                setDevices((prev) =>
+                  prev.map((d) =>
+                    d.device_id === device_id
+                      ? {
+                          ...d,
+                          current_state: state,
+                          last_state_change: created_at ?? d.last_state_change,
+                        }
+                      : d
+                  )
+                );
+              }
+            }
+            debouncedFetch();
+          }
         )
         .on(
           "postgres_changes",
           { event: "*", schema: "public", table: "device_sessions" },
-          debouncedFetch
+          (payload) => {
+            if (payload.new) {
+              const { device_id, end_time } = payload.new as {
+                device_id?: string;
+                end_time?: string;
+              };
+              if (device_id && end_time) {
+                const online = Date.now() - new Date(end_time).getTime() < ONLINE_THRESHOLD_MS;
+                setDevices((prev) =>
+                  prev.map((d) =>
+                    d.device_id === device_id
+                      ? { ...d, is_online: online, last_seen: end_time }
+                      : d
+                  )
+                );
+              }
+            }
+            debouncedFetch();
+          }
         )
         .on(
           "postgres_changes",
@@ -160,10 +200,20 @@ export default function HomePage() {
 
   return (
     <div className="page-container">
-      <h1 className="page-title">Device Overview</h1>
-      <p className="page-subtitle">
-        All registered ESP32 devices and their current status
-      </p>
+      <div className="page-title-row">
+        <div>
+          <h1 className="page-title">Device Overview</h1>
+          <p className="page-subtitle">
+            All registered ESP32 devices and their current status
+          </p>
+        </div>
+        <button
+          className="report-nav-btn"
+          onClick={() => router.push("/report")}
+        >
+          &#128202; Generate Report
+        </button>
+      </div>
 
       <div className="summary-row">
         <div className="summary-card">

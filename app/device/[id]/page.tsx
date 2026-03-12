@@ -141,10 +141,15 @@ export default function DeviceDetailPage() {
     return new Date(y, m - 1, d, 23, 59, 59, 999);
   }, [selectedDate]);
 
+  useEffect(() => {
+    hasLoadedOnce.current = false;
+  }, [selectedDate]);
+
   const [sensorLogs, setSensorLogs] = useState<SensorLog[]>([]);
   const [priorState, setPriorState] = useState<string | null>(null);
   const [sessions, setSessions] = useState<DeviceSession[]>([]);
   const [loading, setLoading] = useState(true);
+  const hasLoadedOnce = useRef(false);
   const [isOnline, setIsOnline] = useState(false);
   const [currentState, setCurrentState] = useState<string | null>(null);
   const [deviceName, setDeviceName] = useState<string | null>(null);
@@ -181,7 +186,7 @@ export default function DeviceDetailPage() {
 
   /* ── data fetching ──────────────────────── */
   const fetchData = useCallback(async () => {
-    setLoading(true);
+    if (!hasLoadedOnce.current) setLoading(true);
     const supabase = getSupabase();
     const isoStart = rangeStart.toISOString();
     const isoEnd = rangeEnd.toISOString();
@@ -243,6 +248,7 @@ export default function DeviceDetailPage() {
       setCurrentState(null);
     }
 
+    hasLoadedOnce.current = true;
     setLoading(false);
   }, [deviceId, rangeStart, rangeEnd]);
 
@@ -272,7 +278,13 @@ export default function DeviceDetailPage() {
             table: "sensor_logs",
             filter: `device_id=eq.${deviceId}`,
           },
-          debouncedFetch
+          (payload) => {
+            if (payload.eventType === "INSERT" && payload.new) {
+              const row = payload.new as { state?: string };
+              if (row.state) setCurrentState(row.state);
+            }
+            debouncedFetch();
+          }
         )
         .on(
           "postgres_changes",
@@ -282,7 +294,16 @@ export default function DeviceDetailPage() {
             table: "device_sessions",
             filter: `device_id=eq.${deviceId}`,
           },
-          debouncedFetch
+          (payload) => {
+            if (payload.new) {
+              const row = payload.new as { end_time?: string };
+              if (row.end_time) {
+                const elapsed = Date.now() - new Date(row.end_time).getTime();
+                setIsOnline(elapsed < 15_000);
+              }
+            }
+            debouncedFetch();
+          }
         )
         .subscribe();
       cleanup = () => supabase.removeChannel(channel);
@@ -372,10 +393,6 @@ export default function DeviceDetailPage() {
               if (e.target.value) setSelectedDate(e.target.value);
             }}
           />
-          <span className="date-nav-display">
-            {format(rangeStart, "dd MMM yyyy")}
-            {isToday && " (Today)"}
-          </span>
           <button
             className="date-nav-btn"
             onClick={() => setSelectedDate(shiftDate(selectedDate, 1))}

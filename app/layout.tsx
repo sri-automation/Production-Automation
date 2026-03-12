@@ -29,9 +29,8 @@ export default function RootLayout({
         <header className="app-header">
           <h1>PRODUCTION MONITORING</h1>
           <nav style={{ display: "flex", gap: "16px" }}>
-            <Link href="/" className="active">
-              Devices
-            </Link>
+            <Link href="/">Devices</Link>
+            <Link href="/report">Reports</Link>
           </nav>
         </header>
         {children}
