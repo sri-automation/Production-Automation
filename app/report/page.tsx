@@ -490,31 +490,57 @@ export default function ReportPage() {
     const html2canvas = (await import("html2canvas")).default;
     const { jsPDF } = await import("jspdf");
 
+    const RENDER_WIDTH = 800;
+
+    el.classList.add("pdf-capture");
+
+    await new Promise((r) => setTimeout(r, 500));
+
     const canvas = await html2canvas(el, {
       scale: 2,
       backgroundColor: "#ffffff",
       useCORS: true,
+      width: RENDER_WIDTH,
+      windowWidth: RENDER_WIDTH + 40,
     });
 
-    const imgData = canvas.toDataURL("image/png");
+    el.classList.remove("pdf-capture");
+
     const imgW = canvas.width;
     const imgH = canvas.height;
 
-    const pdfW = 210;
-    const margin = 10;
-    const contentW = pdfW - margin * 2;
+    const PDF_W = 210;
+    const PDF_H = 297;
+    const MARGIN = 10;
+    const contentW = PDF_W - MARGIN * 2;
     const contentH = (imgH * contentW) / imgW;
+    const pageH = PDF_H - MARGIN * 2;
 
-    const pdf = new jsPDF({
-      orientation: contentH > 280 ? "portrait" : "portrait",
-      unit: "mm",
-      format: "a4",
-    });
+    const pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
 
-    pdf.addImage(imgData, "PNG", margin, margin, contentW, contentH);
-    pdf.save(
-      `report_${report?.deviceLabel}_${selectedDate}.pdf`
-    );
+    if (contentH <= pageH) {
+      pdf.addImage(canvas.toDataURL("image/png"), "PNG", MARGIN, MARGIN, contentW, contentH);
+    } else {
+      const totalPages = Math.ceil(contentH / pageH);
+      const slicePx = Math.floor(imgH / totalPages);
+
+      for (let i = 0; i < totalPages; i++) {
+        if (i > 0) pdf.addPage();
+        const srcY = i * slicePx;
+        const srcH = Math.min(slicePx, imgH - srcY);
+        const destH = (srcH / imgH) * contentH;
+
+        const slice = document.createElement("canvas");
+        slice.width = imgW;
+        slice.height = srcH;
+        const ctx = slice.getContext("2d")!;
+        ctx.drawImage(canvas, 0, srcY, imgW, srcH, 0, 0, imgW, srcH);
+
+        pdf.addImage(slice.toDataURL("image/png"), "PNG", MARGIN, MARGIN, contentW, destH);
+      }
+    }
+
+    pdf.save(`report_${report?.deviceLabel}_${selectedDate}.pdf`);
   }, [report, selectedDate]);
 
   /* ── chart data ───────────────────────────── */
