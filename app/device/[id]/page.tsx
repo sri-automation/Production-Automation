@@ -1,226 +1,190 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo } from "react";
+import {
+  useEffect,
+  useState,
+  useCallback,
+  useMemo,
+  useRef,
+} from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { getSupabase } from "@/lib/supabase";
-import type {
-  SensorLog,
-  DeviceSession,
-  TimeRange,
-} from "@/lib/types";
-import { TIME_RANGE_OPTIONS, getTimeRangeStart } from "@/lib/types";
+import type { SensorLog, DeviceSession, DeviceDetails } from "@/lib/types";
 import { format } from "date-fns";
+import InteractiveTimeline, {
+  type Segment,
+} from "@/components/InteractiveTimeline";
 
-interface TimelineSegment {
-  startPct: number;
-  widthPct: number;
-  label: string;
-  kind: string;
+/* ── helpers ──────────────────────────────── */
+
+function toDateStr(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-function buildSensorTimeline(
+function shiftDate(dateStr: string, days: number): string {
+  const d = new Date(dateStr + "T00:00:00");
+  d.setDate(d.getDate() + days);
+  return toDateStr(d);
+}
+
+function fmtDuration(ms: number): string {
+  const sec = Math.floor(ms / 1000);
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  return [h > 0 ? `${h}h` : "", m > 0 ? `${m}m` : "", `${s}s`]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function buildSensorSegments(
   logs: SensorLog[],
   rangeStart: Date,
   rangeEnd: Date,
   priorState: string | null
-): TimelineSegment[] {
-  const totalMs = rangeEnd.getTime() - rangeStart.getTime();
-  if (totalMs <= 0) return [];
+): Segment[] {
+  const rStart = rangeStart.getTime();
+  const rEnd = rangeEnd.getTime();
+  if (rEnd <= rStart) return [];
 
   const sorted = [...logs].sort(
     (a, b) =>
       new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
   );
 
-  const segments: TimelineSegment[] = [];
-  let cursor = rangeStart.getTime();
-  let currentState = priorState ?? "OFF";
+  const segments: Segment[] = [];
+  let cursor = rStart;
+  let state = priorState ?? "OFF";
 
   for (const log of sorted) {
-    const logTime = new Date(log.created_at).getTime();
-    const clampedLogTime = Math.max(logTime, rangeStart.getTime());
-
-    if (clampedLogTime > cursor) {
-      const startPct = ((cursor - rangeStart.getTime()) / totalMs) * 100;
-      const widthPct =
-        ((clampedLogTime - cursor) / totalMs) * 100;
+    const t = Math.max(new Date(log.created_at).getTime(), rStart);
+    if (t > cursor) {
       segments.push({
-        startPct,
-        widthPct,
-        label: currentState,
-        kind: currentState.toLowerCase(),
+        startTime: new Date(cursor),
+        endTime: new Date(t),
+        label: state,
+        kind: state.toLowerCase(),
       });
     }
-    currentState = log.state;
-    cursor = Math.max(clampedLogTime, cursor);
+    state = log.state;
+    cursor = Math.max(t, cursor);
   }
 
-  if (cursor < rangeEnd.getTime()) {
-    const startPct = ((cursor - rangeStart.getTime()) / totalMs) * 100;
-    const widthPct =
-      ((rangeEnd.getTime() - cursor) / totalMs) * 100;
+  if (cursor < rEnd) {
     segments.push({
-      startPct,
-      widthPct,
-      label: currentState,
-      kind: currentState.toLowerCase(),
+      startTime: new Date(cursor),
+      endTime: new Date(rEnd),
+      label: state,
+      kind: state.toLowerCase(),
     });
   }
-
   return segments;
 }
 
-function buildSessionTimeline(
+function buildSessionSegments(
   sessions: DeviceSession[],
   rangeStart: Date,
   rangeEnd: Date
-): TimelineSegment[] {
-  const totalMs = rangeEnd.getTime() - rangeStart.getTime();
-  if (totalMs <= 0) return [];
+): Segment[] {
+  const rStart = rangeStart.getTime();
+  const rEnd = rangeEnd.getTime();
+  if (rEnd <= rStart) return [];
 
   const sorted = [...sessions].sort(
     (a, b) =>
       new Date(a.start_time).getTime() - new Date(b.start_time).getTime()
   );
 
-  const segments: TimelineSegment[] = [];
-
+  const segments: Segment[] = [];
   for (const s of sorted) {
-    const sStart = Math.max(
-      new Date(s.start_time).getTime(),
-      rangeStart.getTime()
-    );
-    const sEnd = Math.min(
-      new Date(s.end_time).getTime(),
-      rangeEnd.getTime()
-    );
+    const sStart = Math.max(new Date(s.start_time).getTime(), rStart);
+    const sEnd = Math.min(new Date(s.end_time).getTime(), rEnd);
     if (sEnd <= sStart) continue;
-
-    const startPct = ((sStart - rangeStart.getTime()) / totalMs) * 100;
-    const widthPct = ((sEnd - sStart) / totalMs) * 100;
     segments.push({
-      startPct,
-      widthPct,
+      startTime: new Date(sStart),
+      endTime: new Date(sEnd),
       label: "Active",
       kind: "active",
     });
   }
-
   return segments;
 }
 
-function getTimeAxisTicks(
-  rangeStart: Date,
-  rangeEnd: Date,
-  range: TimeRange
-): { pct: number; label: string }[] {
-  const totalMs = rangeEnd.getTime() - rangeStart.getTime();
-  if (totalMs <= 0) return [];
+const SENSOR_LEGEND = [
+  { color: "#22c55e", label: "ON" },
+  { color: "#e2e8f0", label: "OFF" },
+];
+const SESSION_LEGEND = [
+  { color: "#3b82f6", label: "Active" },
+  { color: "#f1f5f9", label: "Inactive", borderColor: "#cbd5e1" },
+];
 
-  let intervalMs: number;
-  let fmt: string;
-  switch (range) {
-    case "1h":
-      intervalMs = 10 * 60 * 1000;
-      fmt = "HH:mm";
-      break;
-    case "6h":
-      intervalMs = 60 * 60 * 1000;
-      fmt = "HH:mm";
-      break;
-    case "12h":
-      intervalMs = 2 * 60 * 60 * 1000;
-      fmt = "HH:mm";
-      break;
-    case "24h":
-      intervalMs = 4 * 60 * 60 * 1000;
-      fmt = "HH:mm";
-      break;
-    case "3d":
-      intervalMs = 12 * 60 * 60 * 1000;
-      fmt = "dd MMM HH:mm";
-      break;
-    case "1w":
-      intervalMs = 24 * 60 * 60 * 1000;
-      fmt = "dd MMM";
-      break;
-    case "1m":
-      intervalMs = 3 * 24 * 60 * 60 * 1000;
-      fmt = "dd MMM";
-      break;
-  }
-
-  const ticks: { pct: number; label: string }[] = [];
-  const firstTick =
-    Math.ceil(rangeStart.getTime() / intervalMs) * intervalMs;
-
-  for (let t = firstTick; t <= rangeEnd.getTime(); t += intervalMs) {
-    const pct = ((t - rangeStart.getTime()) / totalMs) * 100;
-    if (pct >= 0 && pct <= 100) {
-      ticks.push({ pct, label: format(new Date(t), fmt) });
-    }
-  }
-
-  return ticks;
-}
-
-function TimelineBar({
-  segments,
-  ticks,
-}: {
-  segments: TimelineSegment[];
-  ticks: { pct: number; label: string }[];
-}) {
-  return (
-    <div className="timeline-container">
-      <div className="timeline-bar">
-        {segments.map((seg, i) => (
-          <div
-            key={i}
-            className={`timeline-segment ${seg.kind}`}
-            style={{
-              left: `${seg.startPct}%`,
-              width: `${seg.widthPct}%`,
-            }}
-            title={seg.label}
-          />
-        ))}
-      </div>
-      <div className="timeline-axis">
-        {ticks.map((tick, i) => (
-          <span
-            key={i}
-            className="timeline-tick"
-            style={{ left: `${tick.pct}%` }}
-          >
-            {tick.label}
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
+/* ── component ────────────────────────────── */
 
 export default function DeviceDetailPage() {
   const params = useParams();
   const deviceId = decodeURIComponent(params.id as string);
 
-  const [range, setRange] = useState<TimeRange>("24h");
+  const todayStr = toDateStr(new Date());
+  const [selectedDate, setSelectedDate] = useState(todayStr);
+  const isToday = selectedDate === todayStr;
+  const canGoNext = selectedDate < todayStr;
+
+  const rangeStart = useMemo(() => {
+    const [y, m, d] = selectedDate.split("-").map(Number);
+    return new Date(y, m - 1, d, 0, 0, 0, 0);
+  }, [selectedDate]);
+
+  const rangeEnd = useMemo(() => {
+    const [y, m, d] = selectedDate.split("-").map(Number);
+    return new Date(y, m - 1, d, 23, 59, 59, 999);
+  }, [selectedDate]);
+
   const [sensorLogs, setSensorLogs] = useState<SensorLog[]>([]);
   const [priorState, setPriorState] = useState<string | null>(null);
   const [sessions, setSessions] = useState<DeviceSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [isOnline, setIsOnline] = useState(false);
   const [currentState, setCurrentState] = useState<string | null>(null);
+  const [deviceName, setDeviceName] = useState<string | null>(null);
+  const [deviceImage, setDeviceImage] = useState<string | null>(null);
 
-  const rangeEnd = useMemo(() => new Date(), []);
-  const rangeStart = useMemo(() => getTimeRangeStart(range), [range]);
+  /* ── fetch device details (one-time) ──────── */
+  useEffect(() => {
+    (async () => {
+      try {
+        const supabase = getSupabase();
+        const { data } = await supabase
+          .from("device_details")
+          .select("*")
+          .eq("device_id", deviceId)
+          .limit(1);
+        const det: DeviceDetails | undefined = data?.[0];
+        if (det) {
+          setDeviceName(det.device_name);
+          setDeviceImage(det.Image);
+        }
+      } catch {
+        /* supabase not configured */
+      }
+    })();
+  }, [deviceId]);
 
+  /* ── "now" tick every second ─────────────── */
+  const [nowTime, setNowTime] = useState(Date.now());
+  useEffect(() => {
+    if (!isToday) return;
+    const id = setInterval(() => setNowTime(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [isToday]);
+
+  /* ── data fetching ──────────────────────── */
   const fetchData = useCallback(async () => {
     setLoading(true);
     const supabase = getSupabase();
     const isoStart = rangeStart.toISOString();
+    const isoEnd = rangeEnd.toISOString();
 
     const [logsRes, priorRes, sessionsRes, latestSessionRes] =
       await Promise.all([
@@ -229,6 +193,7 @@ export default function DeviceDetailPage() {
           .select("*")
           .eq("device_id", deviceId)
           .gte("created_at", isoStart)
+          .lte("created_at", isoEnd)
           .order("created_at", { ascending: true }),
         supabase
           .from("sensor_logs")
@@ -242,6 +207,7 @@ export default function DeviceDetailPage() {
           .select("*")
           .eq("device_id", deviceId)
           .gte("end_time", isoStart)
+          .lte("start_time", isoEnd)
           .order("start_time", { ascending: true }),
         supabase
           .from("device_sessions")
@@ -278,84 +244,146 @@ export default function DeviceDetailPage() {
     }
 
     setLoading(false);
-  }, [deviceId, rangeStart]);
+  }, [deviceId, rangeStart, rangeEnd]);
 
   useEffect(() => {
     fetchData();
   }, [fetchData]);
 
+  /* ── realtime subscription ──────────────── */
+  const pendingRef = useRef<NodeJS.Timeout>(undefined);
+  const debouncedFetch = useCallback(() => {
+    clearTimeout(pendingRef.current);
+    pendingRef.current = setTimeout(fetchData, 2000);
+  }, [fetchData]);
+
+  useEffect(() => {
+    const interval = setInterval(fetchData, 30_000);
+    let cleanup: (() => void) | undefined;
+    try {
+      const supabase = getSupabase();
+      const channel = supabase
+        .channel(`device-${deviceId}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "sensor_logs",
+            filter: `device_id=eq.${deviceId}`,
+          },
+          debouncedFetch
+        )
+        .on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "device_sessions",
+            filter: `device_id=eq.${deviceId}`,
+          },
+          debouncedFetch
+        )
+        .subscribe();
+      cleanup = () => supabase.removeChannel(channel);
+    } catch {
+      /* supabase not configured */
+    }
+    return () => {
+      clearInterval(interval);
+      clearTimeout(pendingRef.current);
+      cleanup?.();
+    };
+  }, [deviceId, fetchData, debouncedFetch]);
+
+  /* ── derived data ───────────────────────── */
   const sensorSegments = useMemo(
-    () => buildSensorTimeline(sensorLogs, rangeStart, rangeEnd, priorState),
+    () =>
+      buildSensorSegments(sensorLogs, rangeStart, rangeEnd, priorState),
     [sensorLogs, rangeStart, rangeEnd, priorState]
   );
 
   const sessionSegments = useMemo(
-    () => buildSessionTimeline(sessions, rangeStart, rangeEnd),
+    () => buildSessionSegments(sessions, rangeStart, rangeEnd),
     [sessions, rangeStart, rangeEnd]
   );
 
-  const ticks = useMemo(
-    () => getTimeAxisTicks(rangeStart, rangeEnd, range),
-    [rangeStart, rangeEnd, range]
-  );
-
+  /* ── render ─────────────────────────────── */
   return (
     <div className="page-container">
       <div className="breadcrumb">
         <Link href="/">Devices</Link>
         <span className="separator">/</span>
-        <span>{deviceId}</span>
+        <span>{deviceName ?? deviceId}</span>
       </div>
 
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          marginBottom: "16px",
-          flexWrap: "wrap",
-          gap: "8px",
-        }}
-      >
-        <div>
-          <h1 className="page-title" style={{ marginBottom: 0 }}>
-            <span className="device-id" style={{ fontSize: "18px" }}>
-              {deviceId}
-            </span>
-          </h1>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "12px",
-              marginTop: "6px",
-            }}
-          >
-            <span
-              className={`status-badge ${isOnline ? "online" : "offline"}`}
-            >
-              <span className="dot" />
-              {isOnline ? "Online" : "Offline"}
-            </span>
-            {currentState && (
-              <span
-                className={`state-badge ${currentState.toLowerCase()}`}
-              >
-                Sensor: {currentState}
-              </span>
+      {/* Header row */}
+      <div className="device-header-row">
+        <div className="device-header-info">
+          {deviceImage ? (
+            <img
+              className="device-icon-lg"
+              src={deviceImage}
+              alt={deviceName ?? deviceId}
+            />
+          ) : (
+            <span className="device-icon-placeholder-lg" />
+          )}
+          <div>
+            <h1 className="page-title" style={{ marginBottom: 0 }}>
+              {deviceName ?? deviceId}
+            </h1>
+            {deviceName && (
+              <span className="device-id-sub">{deviceId}</span>
             )}
+            <div className="device-header-badges">
+              <span
+                className={`status-badge ${isOnline ? "online" : "offline"}`}
+              >
+                <span className="dot" />
+                {isOnline ? "Online" : "Offline"}
+              </span>
+              {currentState && (
+                <span
+                  className={`state-badge ${currentState.toLowerCase()}`}
+                >
+                  Sensor: {currentState}
+                </span>
+              )}
+            </div>
           </div>
         </div>
-        <div className="time-range-selector">
-          {TIME_RANGE_OPTIONS.map((opt) => (
-            <button
-              key={opt.value}
-              className={range === opt.value ? "active" : ""}
-              onClick={() => setRange(opt.value)}
-            >
-              {opt.label}
-            </button>
-          ))}
+
+        {/* Date navigator */}
+        <div className="date-nav">
+          <button
+            className="date-nav-btn"
+            onClick={() => setSelectedDate(shiftDate(selectedDate, -1))}
+            title="Previous day"
+          >
+            &#9664;
+          </button>
+          <input
+            type="date"
+            className="date-nav-input"
+            value={selectedDate}
+            max={todayStr}
+            onChange={(e) => {
+              if (e.target.value) setSelectedDate(e.target.value);
+            }}
+          />
+          <span className="date-nav-display">
+            {format(rangeStart, "dd MMM yyyy")}
+            {isToday && " (Today)"}
+          </span>
+          <button
+            className="date-nav-btn"
+            onClick={() => setSelectedDate(shiftDate(selectedDate, 1))}
+            disabled={!canGoNext}
+            title="Next day"
+          >
+            &#9654;
+          </button>
         </div>
       </div>
 
@@ -372,31 +400,14 @@ export default function DeviceDetailPage() {
               <h2>Sensor State Timeline</h2>
             </div>
             <div className="panel-body">
-              {sensorSegments.length === 0 ? (
-                <div className="empty-state">
-                  No sensor data available for this time range.
-                </div>
-              ) : (
-                <>
-                  <TimelineBar segments={sensorSegments} ticks={ticks} />
-                  <div className="timeline-legend">
-                    <span>
-                      <span
-                        className="swatch"
-                        style={{ background: "#22c55e" }}
-                      />
-                      ON
-                    </span>
-                    <span>
-                      <span
-                        className="swatch"
-                        style={{ background: "#e2e8f0" }}
-                      />
-                      OFF
-                    </span>
-                  </div>
-                </>
-              )}
+              <InteractiveTimeline
+                segments={sensorSegments}
+                rangeStart={rangeStart}
+                rangeEnd={rangeEnd}
+                legend={SENSOR_LEGEND}
+                emptyMessage="No sensor data available for this date."
+                nowTime={isToday ? nowTime : undefined}
+              />
             </div>
           </div>
 
@@ -406,34 +417,14 @@ export default function DeviceDetailPage() {
               <h2>Device Activity Timeline</h2>
             </div>
             <div className="panel-body">
-              {sessionSegments.length === 0 ? (
-                <div className="empty-state">
-                  No session data available for this time range.
-                </div>
-              ) : (
-                <>
-                  <TimelineBar
-                    segments={sessionSegments}
-                    ticks={ticks}
-                  />
-                  <div className="timeline-legend">
-                    <span>
-                      <span
-                        className="swatch"
-                        style={{ background: "#3b82f6" }}
-                      />
-                      Active
-                    </span>
-                    <span>
-                      <span
-                        className="swatch"
-                        style={{ background: "#f1f5f9", border: "1px solid #cbd5e1" }}
-                      />
-                      Inactive
-                    </span>
-                  </div>
-                </>
-              )}
+              <InteractiveTimeline
+                segments={sessionSegments}
+                rangeStart={rangeStart}
+                rangeEnd={rangeEnd}
+                legend={SESSION_LEGEND}
+                emptyMessage="No session data available for this date."
+                nowTime={isToday ? nowTime : undefined}
+              />
             </div>
           </div>
 
@@ -442,13 +433,14 @@ export default function DeviceDetailPage() {
             <div className="panel-header">
               <h2>Sensor Event Log</h2>
               <span style={{ fontSize: "12px", color: "var(--muted)" }}>
-                {sensorLogs.length} event{sensorLogs.length !== 1 && "s"}
+                {sensorLogs.length} event
+                {sensorLogs.length !== 1 && "s"}
               </span>
             </div>
-            <div style={{ overflowX: "auto" }}>
+            <div className="log-scroll-container">
               {sensorLogs.length === 0 ? (
                 <div className="empty-state">
-                  No sensor events in this time range.
+                  No sensor events for this date.
                 </div>
               ) : (
                 <table className="data-table">
@@ -493,13 +485,14 @@ export default function DeviceDetailPage() {
             <div className="panel-header">
               <h2>Session History</h2>
               <span style={{ fontSize: "12px", color: "var(--muted)" }}>
-                {sessions.length} session{sessions.length !== 1 && "s"}
+                {sessions.length} session
+                {sessions.length !== 1 && "s"}
               </span>
             </div>
-            <div style={{ overflowX: "auto" }}>
+            <div className="log-scroll-container">
               {sessions.length === 0 ? (
                 <div className="empty-state">
-                  No sessions in this time range.
+                  No sessions for this date.
                 </div>
               ) : (
                 <table className="data-table">
@@ -513,23 +506,9 @@ export default function DeviceDetailPage() {
                   </thead>
                   <tbody>
                     {[...sessions].reverse().map((s) => {
-                      const durationMs =
+                      const dur =
                         new Date(s.end_time).getTime() -
                         new Date(s.start_time).getTime();
-                      const durationSec = Math.floor(durationMs / 1000);
-                      const hours = Math.floor(durationSec / 3600);
-                      const mins = Math.floor(
-                        (durationSec % 3600) / 60
-                      );
-                      const secs = durationSec % 60;
-                      const durationStr = [
-                        hours > 0 ? `${hours}h` : "",
-                        mins > 0 ? `${mins}m` : "",
-                        `${secs}s`,
-                      ]
-                        .filter(Boolean)
-                        .join(" ");
-
                       return (
                         <tr key={`${s.device_id}-${s.session_id}`}>
                           <td>
@@ -558,7 +537,7 @@ export default function DeviceDetailPage() {
                           </td>
                           <td>
                             <span className="timestamp">
-                              {durationStr}
+                              {fmtDuration(dur)}
                             </span>
                           </td>
                         </tr>

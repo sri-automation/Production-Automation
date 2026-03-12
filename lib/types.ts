@@ -12,8 +12,18 @@ export interface DeviceSession {
   end_time: string;
 }
 
+export interface DeviceDetails {
+  id: number;
+  device_id: string;
+  device_name: string | null;
+  created_at: string;
+  Image: string | null;
+}
+
 export interface DeviceInfo {
   device_id: string;
+  device_name: string | null;
+  image_url: string | null;
   is_online: boolean;
   last_seen: string | null;
   current_state: string | null;
