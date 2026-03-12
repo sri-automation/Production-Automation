@@ -1,65 +1,199 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import { useEffect, useState, useCallback } from "react";
+import { useRouter } from "next/navigation";
+import { getSupabase } from "@/lib/supabase";
+import type { SensorLog, DeviceSession, DeviceInfo } from "@/lib/types";
+import { format } from "date-fns";
+
+const ONLINE_THRESHOLD_MS = 15_000;
+
+export default function HomePage() {
+  const router = useRouter();
+  const [devices, setDevices] = useState<DeviceInfo[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const fetchDevices = useCallback(async () => {
+    const supabase = getSupabase();
+    const [sessionsRes, logsRes] = await Promise.all([
+      supabase
+        .from("device_sessions")
+        .select("device_id, session_id, start_time, end_time")
+        .order("end_time", { ascending: false }),
+      supabase
+        .from("sensor_logs")
+        .select("id, device_id, state, created_at")
+        .order("created_at", { ascending: false }),
+    ]);
+
+    const sessions: DeviceSession[] = sessionsRes.data ?? [];
+    const logs: SensorLog[] = logsRes.data ?? [];
+
+    const deviceMap = new Map<string, DeviceInfo>();
+
+    for (const s of sessions) {
+      if (!deviceMap.has(s.device_id)) {
+        const timeSinceUpdate =
+          Date.now() - new Date(s.end_time).getTime();
+        deviceMap.set(s.device_id, {
+          device_id: s.device_id,
+          is_online: timeSinceUpdate < ONLINE_THRESHOLD_MS,
+          last_seen: s.end_time,
+          current_state: null,
+          last_state_change: null,
+        });
+      }
+    }
+
+    for (const l of logs) {
+      const existing = deviceMap.get(l.device_id);
+      if (existing && existing.current_state === null) {
+        existing.current_state = l.state;
+        existing.last_state_change = l.created_at;
+      }
+      if (!deviceMap.has(l.device_id)) {
+        deviceMap.set(l.device_id, {
+          device_id: l.device_id,
+          is_online: false,
+          last_seen: null,
+          current_state: l.state,
+          last_state_change: l.created_at,
+        });
+      }
+    }
+
+    const sorted = Array.from(deviceMap.values()).sort((a, b) =>
+      a.device_id.localeCompare(b.device_id)
+    );
+
+    setDevices(sorted);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    fetchDevices();
+    const interval = setInterval(fetchDevices, 10_000);
+    return () => clearInterval(interval);
+  }, [fetchDevices]);
+
+  const onlineCount = devices.filter((d) => d.is_online).length;
+  const offlineCount = devices.filter((d) => !d.is_online).length;
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <div className="page-container">
+      <h1 className="page-title">Device Overview</h1>
+      <p className="page-subtitle">
+        All registered ESP32 devices and their current status
+      </p>
+
+      <div className="summary-row">
+        <div className="summary-card">
+          <div className="label">Total Devices</div>
+          <div className="value">{devices.length}</div>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+        <div className="summary-card">
+          <div className="label">Online</div>
+          <div className="value" style={{ color: "var(--success)" }}>
+            {onlineCount}
+          </div>
         </div>
-      </main>
+        <div className="summary-card">
+          <div className="label">Offline</div>
+          <div className="value" style={{ color: "var(--danger)" }}>
+            {offlineCount}
+          </div>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="panel-header">
+          <h2>Device Registry</h2>
+          <span style={{ fontSize: "12px", color: "var(--muted)" }}>
+            Auto-refreshes every 10s
+          </span>
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          {loading ? (
+            <div className="loading-state">
+              <span className="loading-spinner" />
+              Loading devices...
+            </div>
+          ) : devices.length === 0 ? (
+            <div className="empty-state">
+              No devices found. Ensure your ESP32 devices are sending data to
+              Supabase.
+            </div>
+          ) : (
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Device ID</th>
+                  <th>Status</th>
+                  <th>Last Seen</th>
+                  <th>Sensor State</th>
+                  <th>Last State Change</th>
+                </tr>
+              </thead>
+              <tbody>
+                {devices.map((d) => (
+                  <tr
+                    key={d.device_id}
+                    className="clickable"
+                    onClick={() =>
+                      router.push(
+                        `/device/${encodeURIComponent(d.device_id)}`
+                      )
+                    }
+                  >
+                    <td>
+                      <span className="device-id">{d.device_id}</span>
+                    </td>
+                    <td>
+                      <span
+                        className={`status-badge ${d.is_online ? "online" : "offline"}`}
+                      >
+                        <span className="dot" />
+                        {d.is_online ? "Online" : "Offline"}
+                      </span>
+                    </td>
+                    <td>
+                      <span className="timestamp">
+                        {d.last_seen
+                          ? format(
+                              new Date(d.last_seen),
+                              "dd MMM yyyy, HH:mm:ss"
+                            )
+                          : "—"}
+                      </span>
+                    </td>
+                    <td>
+                      {d.current_state ? (
+                        <span
+                          className={`state-badge ${d.current_state.toLowerCase()}`}
+                        >
+                          {d.current_state}
+                        </span>
+                      ) : (
+                        <span style={{ color: "var(--muted)" }}>—</span>
+                      )}
+                    </td>
+                    <td>
+                      <span className="timestamp">
+                        {d.last_state_change
+                          ? format(
+                              new Date(d.last_state_change),
+                              "dd MMM yyyy, HH:mm:ss"
+                            )
+                          : "—"}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
